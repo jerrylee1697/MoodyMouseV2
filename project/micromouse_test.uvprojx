@@ -683,16 +683,6 @@
               <FileType>5</FileType>
               <FilePath>..\user_Libraries\inc\floodfill.h</FilePath>
             </File>
-            <File>
-              <FileName>floodfill_algorithm.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\user_Libraries\inc\floodfill_algorithm.h</FilePath>
-            </File>
-            <File>
-              <FileName>floodfill2.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\user_Libraries\inc\floodfill2.h</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
@@ -772,16 +762,6 @@
               <FileName>floodfill.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user_Libraries\src\floodfill.c</FilePath>
-            </File>
-            <File>
-              <FileName>floodfill_algorithm.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\user_Libraries\src\floodfill_algorithm.c</FilePath>
-            </File>
-            <File>
-              <FileName>floodfill2.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\user_Libraries\src\floodfill2.c</FilePath>
             </File>
           </Files>
         </Group>

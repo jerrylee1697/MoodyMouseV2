@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include "floodfill.h"
 #include "led.h"
 
 int nextCellState = LEFT + RIGHT;

@@ -1,323 +1,399 @@
-//for this version DON'T use the test maze. The wall values are hard coded 
-//using maze_wallinput so just run the whole thing.
-
-#include <cmath>
-#include <stdlib.h>
 #include "floodfill.h"
+#include "movement.h"
+#include "state.h"
+#include <stdio.h>
+#include "pid.h"
+#include "delay.h"
+#include "buzzer.h"
+#include "led.h"
+#include "pwm.h"
 
-struct graph m[SIZ][SIZ];
-//-----------stack-----------
+/*
+Maze Orientation:
+(0, SIZE)________(SIZE, SIZE)
+				|				|
+				|				|
+				|_______|
+(0, 0)					(SIZE, 0)
+*/
 
-struct Stack stack;
-Stack* s = &stack;
-struct vertex c;
+int orientation;
 
-//--- Optimal Path Stack ------ //
-struct Stack optimal;
-Stack* op = &optimal;
-struct graph f[SIZ][SIZ];
+int current_x = 0; // Initialized to starting cell in maze
+int current_y = 0;
 
-void Stack_Init(Stack *S)
+struct Vertex maze[SIZE][SIZE];
+
+extern int selector;
+
+// Initialize walls to be just the borders of the maze.
+void init_walls(void)
 {
-    S->size = 0;
+	// Initialize all walls to 0
+	for (int i = 0; i < SIZE; ++i) {
+		for (int j = 0; j < SIZE; ++j) {
+			maze[i][j].walls = 0;
+			maze[i][j].x = i;
+			maze[i][j].y = j;
+		}
+	}
+	
+	// Add borders
+	for (int i = 0; i < SIZE; ++i) {
+		maze[0][i].walls += WEST_WALL;
+		maze[i][SIZE - 1].walls += NORTH_WALL;
+		maze[SIZE - 1][i].walls += EAST_WALL;
+		maze[i][0].walls += SOUTH_WALL;
+	}
+	maze[0][0].walls += EAST_WALL;	// Starting cell wall
 }
 
-struct vertex Stack_Top(Stack *S)
+void init_costs(void) {
+	int cost = 14;
+	for (int i = 0; i < SIZE/2; ++i) {
+		for (int j = 0; j < SIZE/2; ++j) {
+			maze[i][j].cost = cost;
+			cost -= 1;
+		}
+		cost += 1;
+		for (int j = SIZE/2; j < SIZE; ++j) {
+			maze[i][j].cost = cost;
+			cost += 1;
+		}
+		cost -= 2;
+	}
+	cost = 7;
+	for (int i = SIZE/2; i < SIZE; ++i) {
+		for (int j = 0; j < SIZE/2; ++j) {
+			maze[i][j].cost = cost;
+			cost -= 1;
+		}
+		cost += 1;
+		for (int j = SIZE/2; j < SIZE; ++j) {
+			maze[i][j].cost = cost;
+			cost += 1;
+		}
+	}
+}
+
+// Add walls to a cell, and all of its adjacent cells
+void add_walls(const int x, const int y, const unsigned char walls)
 {
-  struct vertex v;
-  v.x = -1;
-  v.y = -1;
+	// Make sure x and y are within bounds of the maze
+	if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) {
+		return;
+	}
+	if (walls & NORTH_WALL) {
+		// Add the wall to this cell
+		if (!(maze[x][y].walls & NORTH_WALL)) { // Check if this cell already has this wall
+			maze[x][y].walls += NORTH_WALL;	// Only add if this cell doesn't already have this wall
+		}
 
-    if (S->size == 0) {
-        return v;
-    } 
+		// Add the wall to adjacent cell
+		if (y < SIZE - 1) { // Check bounds to make sure this isn't a border wall
+			if (!(maze[x][y + 1].walls & SOUTH_WALL)) { // Check if adjacent cell already has a south wall
+				maze[x][y + 1].walls += SOUTH_WALL;	// Only add if adjacent cell doesn't already have this wall
+			}
+		}
+	}
+	if (walls & EAST_WALL) {
+		// Add the wall to this cell
+		if (!(maze[x][y].walls & EAST_WALL)) { // Check if this cell already has this wall
+			maze[x][y].walls += EAST_WALL;	// Only add if this cell doesn't already have this wall
+		}
 
-    return S->data[S->size-1];
+		if (x < SIZE - 1) { // Check bounds to make sure this isn't a border wall
+			if (!(maze[x + 1][y].walls & WEST_WALL)) { // Check if adjacent cell already has a west wall
+				maze[x + 1][y].walls += WEST_WALL;	// Only add if adjacent cell doesn't already have this wall
+			}
+		}
+	}
+	if (walls & SOUTH_WALL) {
+		// Add the wall to this cell
+		if (!(maze[x][y].walls & SOUTH_WALL)) { // Check if this cell already has this wall
+			maze[x][y].walls += SOUTH_WALL;	// Only add if this cell doesn't already have this wall
+		}
+
+		if (y > 0) { // Check bounds to make sure this isn't a border wall
+			if (!(maze[x][y - 1].walls & NORTH_WALL)) { // Check if adjacent cell already has a north wall
+				maze[x][y - 1].walls += NORTH_WALL;	// Only add if adjacent cell doesn't already have this wall
+			}
+		}
+	}
+	if (walls & WEST_WALL) {
+		// Add the wall to this cell
+		if (!(maze[x][y].walls & WEST_WALL)) { // Check if this cell already has this wall
+			maze[x][y].walls += WEST_WALL;	// Only add if this cell doesn't already have this wall
+		}
+
+		if (x > 0) { // Check bounds to make sure this isn't a border wall
+			if (!(maze[x - 1][y].walls & EAST_WALL)) { // Check if adjacent cell already has a east wall
+				maze[x - 1][y].walls += EAST_WALL;	// Only add if adjacent cell doesn't already have this wall
+			}
+		}
+	}
 }
 
-struct vertex Stack_Second_Top(Stack *S)
+// x: coordinate of current cell
+// y: coordinate of current cell
+// Returns the neighbor with the lowest cost
+struct Vertex least_cost_neighbor(const int x, const int y)
 {
-  struct vertex v;
-  v.x = -1;
-  v.y = -1;
+	int min_cost = INF;
+	struct Vertex best_neighbor;
+	if (!(maze[x][y].walls & NORTH_WALL) && y < SIZE - 1) {	// If no north wall AND cell is not on north border
+		if (min_cost > maze[x][y + 1].cost) {	// Update min_cost if neigbor's cost is less than current cell's cost
+			min_cost = maze[x][y + 1].cost;
+			best_neighbor = maze[x][y + 1];
+		}
+	}
+	if (!(maze[x][y].walls & EAST_WALL) && x < SIZE - 1) {
+		if (min_cost > maze[x + 1][y].cost) {
+			min_cost = maze[x + 1][y].cost;
+			best_neighbor = maze[x + 1][y];
+		}
+	}
+	if (!(maze[x][y].walls & SOUTH_WALL) && y > 0) {
+		if (min_cost > maze[x][y - 1].cost) {
+			min_cost = maze[x][y - 1].cost;
+			best_neighbor = maze[x][y - 1];
+		}
+	}
+	if (!(maze[x][y].walls & WEST_WALL) && x > 0) {
+		if (min_cost > maze[x - 1][y].cost) {
+			min_cost = maze[x - 1][y].cost;
+			best_neighbor = maze[x - 1][y];
+		}
+	}
 
-    if (S->size < 2) {
-        return v;
-    } 
-
-    return S->data[S->size-2];
+	// Check to see if mouse thinks it's trapped
+	/*if (best_neighbor.cost == INF) {
+		// ABORTTTTT
+	}*/
+	return best_neighbor;
 }
-
-void Stack_Push(Stack *S, struct vertex d)
+#include <stdbool.h>
+void flood_fill(void)
 {
-    if (S->size < STACK_MAX)
-        S->data[S->size++] = d;
+	// Fill all cells with most optimistic distance in cells to the goal:
+	// While the current cell's value is incremented
+	bool value_incremented;
+	do {
+		value_incremented = false;
+		//shortBeep(20, 3000);
+
+		// For every cell in the maze
+		for (int i = 0; i < SIZE; ++i) {
+			for (int j = 0; j < SIZE; ++j) {
+				// Is the cell's value greater than the minimum value of its accessible neighbors?			
+				struct Vertex best_neighbor = least_cost_neighbor(i, j);
+				
+				//printf("%d, %d ", maze[i][j].cost, best_neighbor.cost);
+
+				// If no, change the cell's value to one greater than the minimum value of its accessible neighbors
+				if (maze[i][j].cost <= best_neighbor.cost && maze[i][j].cost != 0) {
+					//printf("x: %d, y: %d, cost: %d\n", i, j, best_neighbor.cost);
+					maze[i][j].cost = best_neighbor.cost + 1;
+					value_incremented = true;
+				}
+			}
+			//printf("\n");
+		}
+	} while(value_incremented);
 }
 
-void Stack_Pop(Stack *S)
+void run_search(void)
 {
-        S->size--;
+	current_x = 0;
+	current_y = 0;
+	while (maze[current_x][current_y].cost != 0) {
+		struct Vertex next_cell = least_cost_neighbor(current_x, current_y);
+
+		//printf("%d, %d, %d\n", next_cell.x, next_cell.y, next_cell.cost);
+		
+		/*if (current_x == 6 && current_y == 8) {
+			for (int i = SIZE - 1; i >= 0; --i) {
+				for (int j = 0; j < SIZE; ++j) {
+					printf("%d ", maze[j][i].cost);
+				}
+				printf("\n");
+			}
+		}*/
+		
+		// Move to next cell
+		move_floodfill(next_cell);
+		current_x = next_cell.x;
+		current_y = next_cell.y;
+	}
+	targetSpeedX = 0;
+	targetSpeedW = 0;
+	LED_Fancy_On();
+	levelComplete();
+	LED_Fancy_On();
+	ALL_LED_ON;
+	delay_ms(200);
+	ALL_LED_OFF;
+	delay_ms(200);
+	ALL_LED_ON;
+	delay_ms(200);
+	ALL_LED_OFF;
+	delay_ms(200);
+	ALL_LED_ON;
+	delay_ms(40);
+	extern bool pid;
+	pid = false;
+	setLeftPwm(0);
+	setRightPwm(0);
+	resetPID();
+	
+	delay_ms(3000);
 }
 
-
-void init_adjacency() {
-	int i,j;
-    for(i = 0;i < SIZ; i++) {
-    	for(j=0;j<SIZ;j++) {
-                      
-                      m[i][j].v[0].x = i; m[i][j].v[0].y = j-1;
-                      m[i][j].v[2].x = i; m[i][j].v[2].y = j+1;
-                      m[i][j].v[1].x = i+1; m[i][j].v[1].y = j;
-                      m[i][j].v[3].x = i-1; m[i][j].v[3].y = j;
-     	}
- 	}
-     
+void return_to_start(void)
+{
+	// Remove all costs of maze
+	for (int i = 0; i < SIZE; ++i) {
+		for (int j = 0; j < SIZE; ++j) {
+			maze[i][j].cost = INF;
+		}
+	}
+	maze[0][0].cost = 0;
+	flood_fill();
+	run_search();
+	turnAround();
 }
 
-void assign_dist() {
-	int i,j;
-    for(i = 0;i < SIZ; i++) {
-    	for(j = 0;j < SIZ;j++) {
-    		if((i < (SIZ/2))&&(j < (SIZ/2))) {m[i][j].dist = (SIZ-2)-j-i;}
-            if((i>=(SIZ/2))&&(j<(SIZ/2))) {m[i][j].dist = m[(SIZ-1)-i][j].dist;}
-            if((i<(SIZ/2))&&(j>=(SIZ/2))) {m[i][j].dist = m[i][(SIZ-1)-j].dist;}
-            if((i>=(SIZ/2))&&(j>=(SIZ/2))) {m[i][j].dist = m[(SIZ-1)-i][(SIZ-1)-j].dist;}
-    	}
-    }
-    for(i = 0; i <= SIZ; i++) {
-      for(j = 0; j <= SIZ; j++) {
-        m[i][j].x = i;
-        m[i][j].y = j;
-        if(i == SIZ) {m[i][j].dist = -1;}
-        if(j == SIZ) {m[i][j].dist = -1;}
-        m[i][j].visited = false;
-      }
-    }
-    for(i = 0; i < SIZ; ++i) {
-      if(i<(SIZ/2)) {m[i][0].dist = SIZ-2-i;}
-      if(i>=(SIZ/2)) {m[i][0].dist = SIZ-1-(SIZ-i);}
-    }
-    
+void move_floodfill(struct Vertex next_cell)
+{
+	// Fix orientation
+	const int change_x = next_cell.x - current_x;
+	const int change_y = next_cell.y - current_y;
+	
+	if (change_x == 1) { // Move east
+		if (orientation != 1) {	// Face east
+			if (targetSpeedX > 0) {
+				targetSpeedX = 0;
+				delay_ms(200);
+			}
+			
+			if (orientation == 0) {
+				turnRight();
+			}
+			else if (orientation == 2) {
+				turnLeft();
+			}
+			else if (orientation == 3) {
+				turnAround();
+			}
+		}
+	}
+	else if (change_x == -1) { // Move west
+		if (orientation != 3) {	// Face west
+			if (targetSpeedX > 0) {
+				targetSpeedX = 0;
+				delay_ms(200);
+			}
+			
+			if (orientation == 0) {
+				turnLeft();
+			}
+			else if (orientation == 2) {
+				turnRight();
+			}
+			else if (orientation == 1) {
+				turnAround();
+			}
+		}
+	}
+	else if (change_y == 1) { // Move north
+		if (orientation != 0) {	// Face north
+			if (targetSpeedX > 0) {
+				targetSpeedX = 0;
+				delay_ms(200);
+			}
+			
+			if (orientation == 1) {
+				turnLeft();
+			}
+			else if (orientation == 3) {
+				turnRight();
+			}
+			else if (orientation == 2) {
+				turnAround();
+			}
+		}
+	}
+	else if (change_y == -1) { // Move south
+		if (orientation != 2) {	// Face south
+			if (targetSpeedX > 0) {
+				targetSpeedX = 0;
+				delay_ms(200);
+			}
+			
+			if (orientation == 3) {
+				turnLeft();
+			}
+			else if (orientation == 1) {
+				turnRight();
+			}
+			else if (orientation == 0) {
+				turnAround();
+			}
+		}
+	}
+//	if (selector == 4) {
+//		moveCells();
+//	}
+//	else {
+		moveOneCell();
+
+//	}
 }
 
-void maze_wallinput(int x,int y,int i) {
-  struct vertex curr;
-	struct vertex adj;
-  curr.x = x;
-  curr.y = y;
-
-  if(m[x][y].v[i].x!=-1&&m[x][y].v[i].x!=SIZ&&m[x][y].v[i].y!=-1&&m[x][y].v[i].y!=SIZ) //if it is not a border wall
-  {
-    if(i == 1) { 
-      adj.x = m[x][y].v[i].x;
-      adj.y = m[x][y].v[i].y;
-      m[(m[x][y].v[i].x)][(m[x][y].v[i].y)].v[3].x=-1;m[(m[x][y].v[i].x)][(m[x][y].v[i].y)].v[3].y=-1;
-    }
-    else {
-      adj.x = m[x][y].v[i].x;
-      adj.y = m[x][y].v[i].y;
-      m[(m[x][y].v[i].x)][(m[x][y].v[i].y)].v[abs(2-i)].x=-1;m[(m[x][y].v[i].x)][(m[x][y].v[i].y)].v[abs(2-i)].y=-1;
-    } 
-
-    m[x][y].v[i].x=-1;m[x][y].v[i].y=-1;
-  Stack_Push(s,curr);
-  Stack_Push(s,adj);
-  }
-//set x,y values of both cells to -1 in adjacency lists
-
-  
-}    
-
-void updateDist() {
-	struct vertex push;
-  //printf("HERE");
-  int i = 0;
-  struct vertex top = Stack_Top(s);
-  //printf("TEST");
-  struct vertex min = Stack_Top(s);
-  int x1, y1, min_x, min_y;
-  min_x = min.x;
-  min_y = min.y;
-
-  //printf("ONE");
-  //printf("\n(%d,%d)\n",min.x,min.y);
-
-  for (i=0; i<4; i++) {
-
-    x1 = m[top.x][top.y].v[i].x;
-    //printf("\n%d\n",top.y);
-    y1 = m[top.x][top.y].v[i].y;
-    //printf("\n(%d,%d)\n",x1,y1);
-    /*if(x1 < 0 || x1 > SIZ) {
-      if(i == 0) {x1 = top.x;}
-      if(i == 1) {x1 = top.x + 1;}
-      if(i == 2) {x1 = top.x;}
-      if(i == 3) {x1 = top.x - 1;}
-    }
-    if(y1 < 0 || y1 > SIZ) {
-      if(i == 0) {y1 = top.y - 1;}
-      if(i == 1) {y1 = top.y;}
-      if(i == 2) {y1 = top.y + 1;}
-      if(i == 3) {y1 = top.y;}
-    }*/
-    if(x1 >= 0 && y1 >= 0 && x1 < SIZ && y1 < SIZ) {
-     // printf("HERE");
-      if(m[x1][y1].dist < m[min_x][min_y].dist) {
-       
-        min_x = x1;
-        min_y = y1;
-      }
-    }
-}
-
-  if(m[top.x][top.y].dist != m[min_x][min_y].dist + 1 && m[top.x][top.y].dist != 0) {
-      m[top.x][top.y].dist = m[min_x][min_y].dist + 1;
-      Stack_Pop(s);
-      for(i = 0; i < 4; ++i) {
-        if(i==0) {push.x = top.x; push.y = top.y-1;}
-        else if(i==1) {push.x = top.x+1; push.y = top.y;}
-        else if(i==2) {push.x = top.x; push.y = top.y+1;}
-        else if(i==3) {push.x = top.x-1; push.y = top.y;}
-        if(push.x >= 0 && push.y >= 0 && push.x < SIZ && push.y < SIZ) {
-          Stack_Push(s, push);
-        }
-      }
-    } else {Stack_Pop(s);}
-}
-
-struct vertex floodfill(int x, int y) {
-  int i;
-  int x1, y1;
-  int next_x = x;
-  int next_y = y;
-  int next_dist = 100;
-  struct vertex nextCell;
-
-  for(i = 0; i < 4; i++) {
-    // Serial.println("2");
-    x1 = m[x][y].v[i].x; //x,y at vertices of m[x][y]
-    y1 = m[x][y].v[i].y;
-
-    if(x1 != -1 && x1 != SIZ && y1 != -1 && y1 != SIZ) {
-      if(m[x1][y1].dist < next_dist && m[x1][y1].visited != true) {
-        next_dist = m[x1][y1].dist;
-        next_x = x1;
-        next_y = y1;
-      }
-      
-    }
-  }
-  if(next_x == x && next_y == y) {
-    for(i = 0; i < 4; i++) {
-      // Serial.println("3");
-    x1 = m[x][y].v[i].x; //x,y at vertices of m[x][y]
-    y1 = m[x][y].v[i].y;
-
-    if(x1 != -1 && x1 != SIZ && y1 != -1 && y1 != SIZ) {
-      if(m[x1][y1].dist < next_dist) {
-        next_dist = m[x1][y1].dist;
-        next_x = x1;
-        next_y = y1;
-      }
-      
-    }
-  }
-  }
-
-  if(next_x - m[x][y].x == 1) {
-    nextCell = m[x][y].v[1];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  else if(next_x - m[x][y].x == -1) {
-    nextCell = m[x][y].v[3];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  else if(next_y - m[x][y].y == 1) {
-    nextCell = m[x][y].v[2];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  else if(next_y - m[x][y].y == -1){
-    nextCell = m[x][y].v[0];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  
-  while(stack.size != 0) {
-    updateDist();
-    // Serial.println("4");
-  }
-  m[nextCell.x][nextCell.y].visited = true;
-  return nextCell;
-} 
-
-struct vertex speed_floodfill(int x, int y) {
-   int i;
-  int x1, y1;
-  int next_x = x;
-  int next_y = y;
-  int next_dist = 100;
-  struct vertex nextCell;
-
-  for(i = 0; i < 4; i++) {
-    // Serial.println("2");
-    x1 = m[x][y].v[i].x; //x,y at vertices of m[x][y]
-    y1 = m[x][y].v[i].y;
-
-    if(x1 != -1 && x1 != SIZ && y1 != -1 && y1 != SIZ) {
-      if(m[x1][y1].dist < next_dist && m[x1][y1].visited == true) {
-        next_dist = m[x1][y1].dist;
-        next_x = x1;
-        next_y = y1;
-      }
-      
-    }
-  }
-  if(next_x == x && next_y == y) {
-    for(i = 0; i < 4; i++) {
-      // Serial.println("3");
-    x1 = m[x][y].v[i].x; //x,y at vertices of m[x][y]
-    y1 = m[x][y].v[i].y;
-
-    if(x1 != -1 && x1 != SIZ && y1 != -1 && y1 != SIZ) {
-      if(m[x1][y1].dist < next_dist) {
-        next_dist = m[x1][y1].dist;
-        next_x = x1;
-        next_y = y1;
-      }
-      
-    }
-  }
-  }
-
-  if(next_x - m[x][y].x == 1) {
-    nextCell = m[x][y].v[1];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  else if(next_x - m[x][y].x == -1) {
-    nextCell = m[x][y].v[3];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  else if(next_y - m[x][y].y == 1) {
-    nextCell = m[x][y].v[2];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  else if(next_y - m[x][y].y == -1){
-    nextCell = m[x][y].v[0];
-    nextCell.x = next_x;
-    nextCell.y = next_y;
-  }
-  
-  while(stack.size != 0) {
-    updateDist();
-    // Serial.println("4");
-  }
-  // m[nextCell.x][nextCell.y].visited = true;
-  return nextCell;
-
+void update_walls()
+{
+	if (orientation == 0) {	// North-facing
+		if (frontWall) {
+			add_walls(current_x, current_y + 1, NORTH_WALL);
+		}
+		if (leftWall) {
+			add_walls(current_x, current_y + 1, WEST_WALL);
+		}
+		if (rightWall) {
+			add_walls(current_x, current_y + 1, EAST_WALL);
+		}
+	}
+	else if (orientation == 1) {	// East-facing
+		if (frontWall) {
+			add_walls(current_x + 1, current_y, EAST_WALL);
+		}
+		if (leftWall) {
+			add_walls(current_x + 1, current_y, NORTH_WALL);
+		}
+		if (rightWall) {
+			add_walls(current_x + 1, current_y, SOUTH_WALL);
+		}
+	}
+	else if (orientation == 2) {	// South-facing
+		if (frontWall) {
+			add_walls(current_x, current_y - 1, SOUTH_WALL);
+		}
+		if (leftWall) {
+			add_walls(current_x, current_y - 1, EAST_WALL);
+		}
+		if (rightWall) {
+			add_walls(current_x, current_y - 1, WEST_WALL);
+		}
+	}
+	else if (orientation == 3) {	// West-facing
+		if (frontWall) {
+			add_walls(current_x - 1, current_y, WEST_WALL);
+		}
+		if (leftWall) {
+			add_walls(current_x - 1, current_y, SOUTH_WALL);
+		}
+		if (rightWall) {
+			add_walls(current_x - 1, current_y, NORTH_WALL);
+		}
+	}
 }

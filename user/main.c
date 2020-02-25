@@ -16,9 +16,7 @@
 #include "movement.h"
 #include "state.h"
 #include "pid.h"
-#include "floodfill2.h"
-//#include "floodfill.h"
-//#include "floodfill_algorithm.h"
+#include "floodfill.h"
 
 extern void PID(void);
 extern void updateCurrentSpeed(void);
